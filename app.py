@@ -21,15 +21,16 @@ SMTP_HOST = (os.getenv("SMTP_HOST", "smtp-relay.brevo.com") or "").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = (os.getenv("SMTP_USERNAME", "info.way2tutorials@gmail.com") or "").strip()      # your Brevo login email
 SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD", "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") or "").strip()      # your Brevo SMTP key (xkeysib-...)
-USE_SSL = os.getenv("USE_SSL", "false").lower() == "true"            # Brevo: False (use STARTTLS on 587)
+USE_SSL = os.getenv("USE_SSL", "false").lower() == "true"           # Brevo: False (use STARTTLS on 587)
 
 FROM_EMAIL = (os.getenv("FROM_EMAIL", SMTP_USERNAME) or "").strip()  # must be a verified Brevo sender
-TO_EMAIL = (os.getenv("TO_EMAIL", "arinnovativetechnologies@zohomail.in") or "").strip()
+TO_EMAIL = (os.getenv("TO_EMAIL", "") or "").strip()
 
 APP_NAME = os.getenv("APP_NAME", "Campus Connect")
 
-# Frontend → API base. If you host the HTML from the SAME Flask app, leave empty.
-API_BASE = os.getenv("API_BASE", "")  # "" → same origin; else absolute base like "https://your-app.onrender.com"
+# If frontend is served from SAME Flask app, leave empty.
+# If frontend is on Vercel (or elsewhere), set API_BASE to your backend URL (e.g., https://your-backend.onrender.com)
+API_BASE = os.getenv("API_BASE", "")
 
 # ---- Origin normalization helpers ------------------------------------
 def _norm_origin(o: str) -> str:
@@ -56,19 +57,34 @@ def _to_origin(o: str) -> str:
         return f"https://{o}"
     return o
 
-# Allowed origins for CORS.
+def _origin_host(origin: str) -> str:
+    try:
+        p = urlparse(origin)
+        return (p.netloc or "").lower()
+    except Exception:
+        return ""
+
+# Allowed origins for CORS (exact matches)
 DEFAULT_ALLOWED = {
     _to_origin("http://127.0.0.1:5000"),
     _to_origin("http://localhost:5000"),
     _to_origin("https://getfreeoffers.onrender.com"),  # ← no trailing slash
-    # _to_origin("https://<your-username>.github.io"), # add if using GitHub Pages
+    # _to_origin("https://getfreeoffers.vercel.app"),  # you can add here or via env
 }
-env_origins = (os.getenv("ALLOWED_ORIGINS", "") or "").strip()
-if env_origins:
-    ALLOWED_ORIGINS = {_to_origin(o) for o in env_origins.split(",") if o.strip()}
+_env_allowed = (os.getenv("ALLOWED_ORIGINS", "") or "").strip()
+if _env_allowed:
+    ALLOWED_ORIGINS = {_to_origin(o) for o in _env_allowed.split(",") if o.strip()}
 else:
     ALLOWED_ORIGINS = DEFAULT_ALLOWED
 
+# Allowed suffixes (e.g., ".vercel.app" to allow all preview URLs)
+ALLOWED_ORIGIN_SUFFIXES = {
+    s.strip().lower()
+    for s in (os.getenv("ALLOWED_ORIGIN_SUFFIXES", "") or "").split(",")
+    if s.strip()
+}
+
+# Allow 'null' origins (file://) only if you explicitly enable it
 ALLOW_NULL_ORIGIN = os.getenv("ALLOW_NULL_ORIGIN", "false").lower() == "true"
 # ======================================================================
 
@@ -77,6 +93,7 @@ def is_origin_allowed(origin: str) -> bool:
     Allow if:
     - no Origin header (same-origin requests often omit it)
     - origin exactly matches a whitelisted origin
+    - origin's host ends with any allowed suffix (e.g., *.vercel.app)
     - optionally allow 'null' (file:// etc.) if ALLOW_NULL_ORIGIN is true
     """
     if not origin:
@@ -84,7 +101,14 @@ def is_origin_allowed(origin: str) -> bool:
     o = _to_origin(origin)
     if ALLOW_NULL_ORIGIN and o == "null":
         return True
-    return o in ALLOWED_ORIGINS
+    if o in ALLOWED_ORIGINS:
+        return True
+    host = _origin_host(o)
+    if host and ALLOWED_ORIGIN_SUFFIXES:
+        for suf in ALLOWED_ORIGIN_SUFFIXES:
+            if host.endswith(suf):
+                return True
+    return False
 
 @app.after_request
 def add_security_and_cors_headers(resp):
@@ -242,7 +266,7 @@ def preflight():
 @app.post("/send-email")
 def send_email():
     origin = request.headers.get("Origin", "")
-    print(f"[send-email] Origin: {origin!r}  | Allowed: {sorted(ALLOWED_ORIGINS)}  | NullAllowed={ALLOW_NULL_ORIGIN}")
+    print(f"[send-email] Origin: {origin!r}  | Allowed: {sorted(ALLOWED_ORIGINS)}  | Suffixes: {sorted(ALLOWED_ORIGIN_SUFFIXES)}  | NullAllowed={ALLOW_NULL_ORIGIN}")
     if not is_origin_allowed(origin):
         return jsonify({"ok": False, "error": f"Origin not allowed: {origin or '(none)'}"}), 403
 
@@ -270,6 +294,12 @@ def send_email():
         f"Map: {map_url}\n"
     )
 
+    # Sanity checks before sending
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        return jsonify({"ok": False, "error": "SMTP credentials not set"}), 500
+    if "@" not in SMTP_USERNAME:
+        return jsonify({"ok": False, "error": "SMTP_USERNAME must be your Brevo login email"}), 500
+
     # ----- SMTP send via Brevo (STARTTLS on 587) -----
     msg = EmailMessage()
     msg["From"] = FROM_EMAIL or SMTP_USERNAME
@@ -279,7 +309,7 @@ def send_email():
 
     try:
         if USE_SSL:
-            # Brevo typically uses STARTTLS (False). SSL mode is for port 465.
+            # Typically False for Brevo (SSL is for 465).
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=20) as server:
                 server.login(SMTP_USERNAME, SMTP_PASSWORD)
@@ -300,25 +330,23 @@ def send_email():
 def health():
     def mask(s, keep=3):
         return (s[:keep] + "…" + "*"*5) if s else "NOT SET"
-    def key_state(k: str) -> str:
-        if not k:
-            return "NOT SET"
-        return "SET"  # we never echo secrets
     return jsonify({
         "smtp_host": SMTP_HOST,
         "smtp_port": SMTP_PORT,
         "use_ssl": USE_SSL,
         "username": mask(SMTP_USERNAME),
         "from_email": FROM_EMAIL or SMTP_USERNAME,
-        "to_email": TO_EMAIL,
+        "to_email": TO_EMAIL or "(not set)",
         "api_base": API_BASE or "(same-origin)",
         "allowed_origins": sorted(list(ALLOWED_ORIGINS)),
+        "allowed_origin_suffixes": sorted(list(ALLOWED_ORIGIN_SUFFIXES)),
         "allow_null_origin": ALLOW_NULL_ORIGIN,
-        "smtp_password": key_state(SMTP_PASSWORD),
+        "smtp_password": "SET" if bool(SMTP_PASSWORD) else "NOT SET",
     })
 
 if __name__ == "__main__":
     print("🚀 Serving on http://0.0.0.0:5000  (use HTTPS in production)")
     print("Allowed origins:", sorted(ALLOWED_ORIGINS))
+    print("Allowed suffixes:", sorted(ALLOWED_ORIGIN_SUFFIXES))
     print("ALLOW_NULL_ORIGIN:", ALLOW_NULL_ORIGIN)
     app.run(host="0.0.0.0", port=5000, debug=True)
