@@ -4,9 +4,12 @@
 # python app.py  → http://127.0.0.1:5000   (HTTPS required in production)
 
 import os
-import smtplib, ssl
+import smtplib
+import ssl
 from datetime import datetime
 from email.message import EmailMessage
+from urllib.parse import urlparse
+
 from flask import Flask, render_template_string, request, jsonify, make_response
 
 app = Flask(__name__)
@@ -17,11 +20,11 @@ SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")     # Gmail: smtp.gmail.com
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))           # 587 STARTTLS, 465 SSL
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "cloudkeys1@gmail.com")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "xwtkukcruopujueo")  # Gmail App Password
-USE_SSL      = os.getenv("USE_SSL", "false").lower() == "true"  # True for port 465
+USE_SSL = os.getenv("USE_SSL", "false").lower() == "true"  # True for port 465
 
 # ✅ IMPORTANT: For Gmail, set FROM to SMTP_USERNAME unless you've configured an alias in Gmail.
 FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USERNAME)
-TO_EMAIL   = os.getenv("TO_EMAIL", "arinnovativetechnologies@zohomail.in")
+TO_EMAIL = os.getenv("TO_EMAIL", "arinnovativetechnologies@zohomail.in")
 
 APP_NAME = os.getenv("APP_NAME", "Campus Connect")
 
@@ -29,21 +32,71 @@ APP_NAME = os.getenv("APP_NAME", "Campus Connect")
 # If you open only the HTML from GitHub Pages, set API_BASE to your Render URL (e.g., https://your-app.onrender.com)
 API_BASE = os.getenv("API_BASE", "")  # "" → same origin; else absolute base like "https://your-app.onrender.com"
 
+# ---- Origin normalization helpers ------------------------------------
+def _norm_origin(o: str) -> str:
+    """
+    Normalize an origin-like string:
+    - strip spaces
+    - lowercase
+    - drop trailing slash
+    """
+    if not o:
+        return ""
+    o = o.strip().lower()
+    if o.endswith("/"):
+        o = o[:-1]
+    return o
+
+def _to_origin(o: str) -> str:
+    """
+    Accepts full URLs (with path) or bare origins/hosts and returns a normalized
+    origin in the form "scheme://host[:port]".
+    - If input has scheme+netloc, returns scheme://netloc
+    - If input is a bare host, assumes https://
+    """
+    o = _norm_origin(o)
+    if not o:
+        return ""
+    parsed = urlparse(o)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    if "://" not in o:
+        # bare host like example.com → assume https
+        return f"https://{o}"
+    return o
+
 # Allowed origins for CORS. Comma-separated in env or edit the set below.
-# Example env: ALLOWED_ORIGINS=https://your-app.onrender.com,http://127.0.0.1:5000
-ALLOWED_ORIGINS = {
-    "http://127.0.0.1:5000",
-    "http://localhost:5000",
-    "https://getfreeoffers.onrender.com/",  # TODO: replace with your actual Render URL
+# Example env: ALLOWED_ORIGINS=https://your-app.onrender.com,https://<user>.github.io,http://127.0.0.1:5000
+DEFAULT_ALLOWED = {
+    _to_origin("http://127.0.0.1:5000"),
+    _to_origin("http://localhost:5000"),
+    _to_origin("https://getfreeoffers.onrender.com"),  # ← NOTE: no trailing slash
+    # Add your GitHub Pages origin if you serve HTML from there:
+    # _to_origin("https://<your-username>.github.io"),
 }
 env_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
 if env_origins:
-    ALLOWED_ORIGINS = {o.strip() for o in env_origins.split(",") if o.strip()}
+    ALLOWED_ORIGINS = {_to_origin(o) for o in env_origins.split(",") if o.strip()}
+else:
+    ALLOWED_ORIGINS = DEFAULT_ALLOWED
+
+# Allow 'null' origins (file://, sandboxed iframes) only if you explicitly enable it
+ALLOW_NULL_ORIGIN = os.getenv("ALLOW_NULL_ORIGIN", "false").lower() == "true"
 # ======================================================================
 
 def is_origin_allowed(origin: str) -> bool:
-    # Allow if no Origin header (same-origin or some proxies) OR explicitly whitelisted
-    return (not origin) or (origin in ALLOWED_ORIGINS)
+    """
+    Allow if:
+    - no Origin header (same-origin requests often omit it)
+    - origin exactly matches a whitelisted origin
+    - optionally allow 'null' (for file:// etc.) if ALLOW_NULL_ORIGIN is true
+    """
+    if not origin:
+        return True
+    o = _to_origin(origin)
+    if ALLOW_NULL_ORIGIN and o == "null":
+        return True
+    return o in ALLOWED_ORIGINS
 
 @app.after_request
 def add_security_and_cors_headers(resp):
@@ -52,9 +105,11 @@ def add_security_and_cors_headers(resp):
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Permissions-Policy"] = "geolocation=(self)"
+
     # CORS for allowed origins
     origin = request.headers.get("Origin", "")
     if is_origin_allowed(origin):
+        # echo back the requesting origin (or * if none provided)
         resp.headers["Access-Control-Allow-Origin"] = origin or "*"
         resp.headers["Vary"] = "Origin"
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -200,9 +255,10 @@ def preflight():
 @app.post("/send-email")
 def send_email():
     origin = request.headers.get("Origin", "")
-    print(f"[send-email] Origin: {origin}")
+    print(f"[send-email] Origin: {origin!r}  | Allowed: {sorted(ALLOWED_ORIGINS)}  | NullAllowed={ALLOW_NULL_ORIGIN}")
     if not is_origin_allowed(origin):
-        return jsonify({"ok": False, "error": "Origin not allowed"}), 403
+        # Return the exact origin in the error to pinpoint mismatches quickly
+        return jsonify({"ok": False, "error": f"Origin not allowed: {origin or '(none)'}"}), 403
 
     data = request.get_json(silent=True) or {}
     # Minimal consent guard (kept, but you can remove if not required)
@@ -255,7 +311,7 @@ def send_email():
 
 @app.get("/health")
 def health():
-    def mask(s, keep=3): 
+    def mask(s, keep=3):
         return (s[:keep] + "…" + "*"*5) if s else "NOT SET"
     return jsonify({
         "smtp_host": SMTP_HOST,
@@ -265,10 +321,12 @@ def health():
         "from_email": FROM_EMAIL or SMTP_USERNAME,
         "to_email": TO_EMAIL,
         "api_base": API_BASE or "(same-origin)",
-        "allowed_origins": list(ALLOWED_ORIGINS),
+        "allowed_origins": sorted(list(ALLOWED_ORIGINS)),
+        "allow_null_origin": ALLOW_NULL_ORIGIN,
     })
 
 if __name__ == "__main__":
     print("🚀 Serving on http://0.0.0.0:5000  (use HTTPS in production)")
-    print("Allowed origins:", ALLOWED_ORIGINS)
+    print("Allowed origins:", sorted(ALLOWED_ORIGINS))
+    print("ALLOW_NULL_ORIGIN:", ALLOW_NULL_ORIGIN)
     app.run(host="0.0.0.0", port=5000, debug=True)
