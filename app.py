@@ -19,12 +19,12 @@ app.secret_key = "education-location-secret"
 # Brevo SMTP (Sendinblue) — STARTTLS on 587
 SMTP_HOST = (os.getenv("SMTP_HOST", "smtp-relay.brevo.com") or "").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME = (os.getenv("SMTP_USERNAME", "info.way2tutorials@gmail.com") or "").strip()      # your Brevo login email
-SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD", "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") or "").strip()      # your Brevo SMTP key (xkeysib-...)
+SMTP_USERNAME = (os.getenv("SMTP_USERNAME", "9a08e1001@smtp-brevo.com") or "").strip()      # your Brevo login email
+SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD", "xsmtpsib-c32b70ca2e3179ce733a316721b6604d74615f697f8be69d39add13afb89c9b2-Ml9OSN6hj7ogrURu") or "").strip()      # your Brevo SMTP key (xkeysib-...)
 USE_SSL = os.getenv("USE_SSL", "false").lower() == "true"           # Brevo: False (use STARTTLS on 587)
 
 FROM_EMAIL = (os.getenv("FROM_EMAIL", SMTP_USERNAME) or "").strip()  # must be a verified Brevo sender
-TO_EMAIL = (os.getenv("TO_EMAIL", "") or "").strip()
+TO_EMAIL = (os.getenv("TO_EMAIL", "arinnovativetechnologies@zohomail.in") or "").strip()
 
 APP_NAME = os.getenv("APP_NAME", "Campus Connect")
 
