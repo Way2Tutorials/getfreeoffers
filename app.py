@@ -15,31 +15,25 @@ from flask import Flask, render_template_string, request, jsonify, make_response
 app = Flask(__name__)
 app.secret_key = "education-location-secret"
 
-# ================= CONFIG (edit these or use env vars) =================
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")     # Gmail: smtp.gmail.com
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))           # 587 STARTTLS, 465 SSL
-SMTP_USERNAME = os.getenv("SMTP_USERNAME", "cloudkeys1@gmail.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "xwtkukcruopujueo")  # Gmail App Password
-USE_SSL = os.getenv("USE_SSL", "false").lower() == "true"  # True for port 465
+# ================= CONFIG (read from ENV; do NOT hard-code secrets) =================
+# Brevo SMTP (Sendinblue) — STARTTLS on 587
+SMTP_HOST = (os.getenv("SMTP_HOST", "smtp-relay.brevo.com") or "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = (os.getenv("SMTP_USERNAME", "info.way2tutorials@gmail.com") or "").strip()      # your Brevo login email
+SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD", "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") or "").strip()      # your Brevo SMTP key (xkeysib-...)
+USE_SSL = os.getenv("USE_SSL", "false").lower() == "true"            # Brevo: False (use STARTTLS on 587)
 
-# ✅ IMPORTANT: For Gmail, set FROM to SMTP_USERNAME unless you've configured an alias in Gmail.
-FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USERNAME)
-TO_EMAIL = os.getenv("TO_EMAIL", "arinnovativetechnologies@zohomail.in")
+FROM_EMAIL = (os.getenv("FROM_EMAIL", SMTP_USERNAME) or "").strip()  # must be a verified Brevo sender
+TO_EMAIL = (os.getenv("TO_EMAIL", "arinnovativetechnologies@zohomail.in") or "").strip()
 
 APP_NAME = os.getenv("APP_NAME", "Campus Connect")
 
-# Frontend → API base. If you host the HTML from the SAME Flask app (Render), leave empty.
-# If you open only the HTML from GitHub Pages, set API_BASE to your Render URL (e.g., https://your-app.onrender.com)
+# Frontend → API base. If you host the HTML from the SAME Flask app, leave empty.
 API_BASE = os.getenv("API_BASE", "")  # "" → same origin; else absolute base like "https://your-app.onrender.com"
 
 # ---- Origin normalization helpers ------------------------------------
 def _norm_origin(o: str) -> str:
-    """
-    Normalize an origin-like string:
-    - strip spaces
-    - lowercase
-    - drop trailing slash
-    """
+    """strip, lowercase, drop trailing slash"""
     if not o:
         return ""
     o = o.strip().lower()
@@ -49,10 +43,8 @@ def _norm_origin(o: str) -> str:
 
 def _to_origin(o: str) -> str:
     """
-    Accepts full URLs (with path) or bare origins/hosts and returns a normalized
-    origin in the form "scheme://host[:port]".
-    - If input has scheme+netloc, returns scheme://netloc
-    - If input is a bare host, assumes https://
+    Accepts full URLs (with path) or bare hosts and returns normalized
+    origin "scheme://host[:port]".
     """
     o = _norm_origin(o)
     if not o:
@@ -61,26 +53,22 @@ def _to_origin(o: str) -> str:
     if parsed.scheme and parsed.netloc:
         return f"{parsed.scheme}://{parsed.netloc}"
     if "://" not in o:
-        # bare host like example.com → assume https
         return f"https://{o}"
     return o
 
-# Allowed origins for CORS. Comma-separated in env or edit the set below.
-# Example env: ALLOWED_ORIGINS=https://your-app.onrender.com,https://<user>.github.io,http://127.0.0.1:5000
+# Allowed origins for CORS.
 DEFAULT_ALLOWED = {
     _to_origin("http://127.0.0.1:5000"),
     _to_origin("http://localhost:5000"),
-    _to_origin("https://getfreeoffers.onrender.com"),  # ← NOTE: no trailing slash
-    # Add your GitHub Pages origin if you serve HTML from there:
-    # _to_origin("https://<your-username>.github.io"),
+    _to_origin("https://getfreeoffers.onrender.com"),  # ← no trailing slash
+    # _to_origin("https://<your-username>.github.io"), # add if using GitHub Pages
 }
-env_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+env_origins = (os.getenv("ALLOWED_ORIGINS", "") or "").strip()
 if env_origins:
     ALLOWED_ORIGINS = {_to_origin(o) for o in env_origins.split(",") if o.strip()}
 else:
     ALLOWED_ORIGINS = DEFAULT_ALLOWED
 
-# Allow 'null' origins (file://, sandboxed iframes) only if you explicitly enable it
 ALLOW_NULL_ORIGIN = os.getenv("ALLOW_NULL_ORIGIN", "false").lower() == "true"
 # ======================================================================
 
@@ -89,7 +77,7 @@ def is_origin_allowed(origin: str) -> bool:
     Allow if:
     - no Origin header (same-origin requests often omit it)
     - origin exactly matches a whitelisted origin
-    - optionally allow 'null' (for file:// etc.) if ALLOW_NULL_ORIGIN is true
+    - optionally allow 'null' (file:// etc.) if ALLOW_NULL_ORIGIN is true
     """
     if not origin:
         return True
@@ -109,7 +97,6 @@ def add_security_and_cors_headers(resp):
     # CORS for allowed origins
     origin = request.headers.get("Origin", "")
     if is_origin_allowed(origin):
-        # echo back the requesting origin (or * if none provided)
         resp.headers["Access-Control-Allow-Origin"] = origin or "*"
         resp.headers["Vary"] = "Origin"
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -257,11 +244,9 @@ def send_email():
     origin = request.headers.get("Origin", "")
     print(f"[send-email] Origin: {origin!r}  | Allowed: {sorted(ALLOWED_ORIGINS)}  | NullAllowed={ALLOW_NULL_ORIGIN}")
     if not is_origin_allowed(origin):
-        # Return the exact origin in the error to pinpoint mismatches quickly
         return jsonify({"ok": False, "error": f"Origin not allowed: {origin or '(none)'}"}), 403
 
     data = request.get_json(silent=True) or {}
-    # Minimal consent guard (kept, but you can remove if not required)
     if data.get("consent") is not True:
         return jsonify({"ok": False, "error": "Consent is required"}), 400
 
@@ -285,6 +270,7 @@ def send_email():
         f"Map: {map_url}\n"
     )
 
+    # ----- SMTP send via Brevo (STARTTLS on 587) -----
     msg = EmailMessage()
     msg["From"] = FROM_EMAIL or SMTP_USERNAME
     msg["To"] = TO_EMAIL
@@ -293,6 +279,7 @@ def send_email():
 
     try:
         if USE_SSL:
+            # Brevo typically uses STARTTLS (False). SSL mode is for port 465.
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=20) as server:
                 server.login(SMTP_USERNAME, SMTP_PASSWORD)
@@ -313,6 +300,10 @@ def send_email():
 def health():
     def mask(s, keep=3):
         return (s[:keep] + "…" + "*"*5) if s else "NOT SET"
+    def key_state(k: str) -> str:
+        if not k:
+            return "NOT SET"
+        return "SET"  # we never echo secrets
     return jsonify({
         "smtp_host": SMTP_HOST,
         "smtp_port": SMTP_PORT,
@@ -323,6 +314,7 @@ def health():
         "api_base": API_BASE or "(same-origin)",
         "allowed_origins": sorted(list(ALLOWED_ORIGINS)),
         "allow_null_origin": ALLOW_NULL_ORIGIN,
+        "smtp_password": key_state(SMTP_PASSWORD),
     })
 
 if __name__ == "__main__":
